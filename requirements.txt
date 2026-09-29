@@ -1,0 +1,15 @@
+# R package dependencies for Meridian_Analysis.Rmd
+# This is an R project; do not install this file with pip.
+# Install analysis packages in R with:
+# install.packages(c("tidyverse", "data.table", "scales", "knitr", "rmarkdown"))
+# Optional development checks use the lintr package:
+# install.packages("lintr")
+
+tidyverse
+data.table
+scales
+knitr
+rmarkdown
+
+# Optional development dependency for .lintr checks
+lintr

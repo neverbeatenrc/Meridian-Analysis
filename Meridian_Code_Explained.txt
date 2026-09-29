@@ -1,0 +1,674 @@
+======================================================================
+ MERIDIAN OPEN UNIVERSITY - THE R CODE EXPLAINED
+ File explained: Meridian_Analysis.Rmd
+ Team: The R five
+======================================================================
+
+This file explains the R code in Meridian_Analysis.Rmd step by step:
+what each chunk does, how it does it, and why we did it that way.
+Read it next to the .Rmd file in RStudio. Every chunk in the .Rmd starts
+with a line "# WHAT THIS CHUNK DOES:", and this file follows the same order.
+
+
+----------------------------------------------------------------------
+ CONTENTS
+----------------------------------------------------------------------
+  0. How the file is organised and how to run it
+  1. R basics used in this project (read this first)
+  2. Part 0   - Setup and loading the data
+  3. Part B   - Checking the data can be trusted
+  4. Part C   - Cleaning
+  5. Part D   - Building the master table (the most important step)
+  6. Part E   - Who enrols, and does it matter?
+  7. Part F   - Where and when students leave
+  8. Part G   - How students engage (clicks)
+  9. Part H   - Assessment behaviour
+ 10. Part I   - Where the problem concentrates
+ 11. Part J   - Our innovation: the silent stayers
+ 12. Answer to the Board (key figures)
+ 13. Appendix - The day-14 traffic light (outside the brief)
+ 14. Glossary of the columns in the master table
+ 15. Common questions about the code
+
+
+======================================================================
+ 0. HOW THE FILE IS ORGANISED AND HOW TO RUN IT
+======================================================================
+
+An R Markdown (.Rmd) file mixes two things:
+  - Normal text (headings and explanations), written in Markdown.
+  - Code chunks: grey boxes that start with ```{r chunk-name} and end
+    with ```. Each chunk is a small piece of R code.
+
+When you press "Knit" in RStudio, R runs every chunk from top to bottom,
+and turns the text, tables and charts into one HTML report
+(Meridian_Analysis.html).
+
+IMPORTANT: chunks depend on each other. For example, the "master" table
+is built in Part D and used in every later part. So chunks must run in
+order. Knit always does this. If you run chunks by hand, start from the top.
+
+The header at the top of the file (between the --- lines) is called YAML.
+It sets the title, author, date, and output type:
+    output:
+      html_document:
+        code_folding: hide
+"code_folding: hide" means the code is hidden in the report behind
+"Code" buttons, so the Board sees results first, but code is still there.
+
+Running time: about 1-2 minutes, mostly for reading the 450 MB click file.
+
+
+======================================================================
+ 1. R BASICS USED IN THIS PROJECT
+======================================================================
+
+1.1 The assignment arrow  <-
+    x <- 5          means "store 5 in x".
+    master <- ...   means "store the result in a table called master".
+
+1.2 The pipe  %>%
+    Read %>% as "and then". It passes the result on the left into the
+    function on the right.
+        studentInfo %>% count(final_result)
+    means "take studentInfo, and then count the final results".
+
+1.3 The main dplyr verbs (from the tidyverse)
+    filter()     keep only the rows that match a condition
+    select()     keep (or drop, with a minus sign) certain columns
+    mutate()     add a new column or change an existing one
+    group_by()   split the table into groups (e.g. by final_result)
+    summarise()  reduce each group to one row (e.g. average, count)
+    count()      count rows per group (shortcut for group_by + summarise(n()))
+    arrange()    sort rows
+    distinct()   keep unique rows only
+    slice()      keep rows by position (slice(1) = first row of each group)
+
+1.4 Joins (combining two tables)
+    left_join(A, B, by = key)    keep every row of A, add matching columns of B
+    inner_join(A, B, by = key)   keep only rows that match in both tables
+    anti_join(A, B, by = key)    rows of A that have NO match in B
+                                 (used to check links between tables)
+    semi_join(A, B, by = key)    rows of A that DO have a match in B
+                                 (filters A, adds no columns)
+
+1.5 The key k3
+    One student can take several modules, so id_student alone is NOT
+    unique. We always join with three columns together:
+        k3 <- c("code_module", "code_presentation", "id_student")
+    This means "this student, in this module, in this run".
+
+1.6 Factors
+    A factor is a category with a fixed order, e.g.
+        factor(final_result, levels = c("Distinction","Pass","Fail","Withdrawn"))
+    The order controls how categories appear in charts and tables.
+
+1.7 Helper functions we use a lot
+    if_else(test, yes, no)     choose between two values
+    case_when(a ~ x, b ~ y, TRUE ~ z)
+                               like several if_else in a row; TRUE ~ z
+                               means "everything else"
+    replace_na(x, 0)           turn blanks (NA) into 0
+    mean(x == "Withdrawn")     the SHARE of TRUE values. TRUE counts as 1,
+                               FALSE as 0, so the mean is a percentage.
+    percent(x, 0.1)            show 0.312 as "31.2%" (from scales)
+    comma(32593)               show as "32,593" (from scales)
+    kable()                    print a table neatly in the report (knitr)
+    n()                        number of rows in the current group
+
+1.8 data.table syntax (only for the big click file)
+    The click file has 10.6 million rows, so we use data.table because it is
+    much faster than dplyr for this size. Its syntax is:
+        DT[ rows , columns / calculations , by = groups ]
+    Example:
+        studentVle[, .(total_clicks = sum(sum_click)), by = .(id_student)]
+    means "for every student, add up sum_click". .() means "a list of".
+
+1.9 ggplot2 (charts)
+    Charts are built in layers joined with + :
+        ggplot(data, aes(x = ..., y = ..., fill = ...))   the data and mapping
+        + geom_col()        bars
+        + geom_line()       lines
+        + geom_histogram()  histogram
+        + geom_tile()       heatmap squares
+        + geom_text()       labels
+        + scale_...()       colours and axis formats
+        + labs()            titles and axis names
+    aes() means "which column goes on which part of the chart".
+
+
+======================================================================
+ 2. PART 0 - SETUP AND LOADING THE DATA
+======================================================================
+
+CHUNK: setup
+  What:  Loads the packages (toolboxes) and hides messages in the report.
+  How:
+    knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+        -> stops package messages cluttering the report.
+    library(tidyverse)   data handling (dplyr, tidyr, readr, purrr) and
+                         charts (ggplot2)
+    library(data.table)  very fast reading and summarising of big files
+    library(scales)      percent() and comma() number formats
+    library(knitr)       kable() tables
+  Why:   Every later chunk needs these functions.
+
+CHUNK: load-data
+  What:  Reads the 7 CSV files into R.
+  How:
+    read_csv("Data/studentInfo.csv") ... for the six smaller files.
+    fread("Data/studentVle.csv") for the 10.6-million-row click file.
+    A small tibble() then lists how many rows each table has.
+  Why:   fread() is many times faster than read_csv() on a big file.
+         The row counts confirm the files loaded completely
+         (e.g. 32,593 students, 10,655,280 clicks).
+  Note:  The path "Data/..." is relative to the folder holding the .Rmd,
+         so the Data folder must stay next to the .Rmd file.
+
+
+======================================================================
+ 3. PART B - CHECKING THE DATA CAN BE TRUSTED
+======================================================================
+
+CHUNK: data-checks
+  What:  Three checks before we trust or join any table.
+  How:
+    1) Primary key check. A small helper function:
+         is_unique <- function(df, cols)
+             nrow(distinct(df, across(all_of(cols)))) == nrow(df)
+       If the number of distinct key values equals the number of rows,
+       every row is unique. Checked for all six small tables. All TRUE.
+
+    2) Link check. For each pair of linked tables, count rows that
+       fail to find a partner:
+         anti_join(studentRegistration, studentInfo, by = k3)
+         anti_join(studentInfo, courses, by = module + presentation)
+         anti_join(assessments, courses, ...)
+         anti_join(vle, courses, ...)
+         studentAssessment$id_assessment %in% assessments$id_assessment
+         studentVle$id_site %in% vle$id_site
+         unique students in the click log vs studentInfo
+       All 7 links show 0 unmatched rows.
+
+    3) Missing values. map_dfr() runs colSums(is.na(.x)) on every table
+       and lists the columns with at least one blank.
+  Why:   If keys were duplicated or links broken, joins would silently
+         create duplicate or missing rows and every number would be wrong.
+  Result (explained in the text under the chunk):
+       imd_band 1,111 blank -> kept as "Unknown"
+       date_unregistration 22,521 blank -> means "did not unregister"
+       assessment date 11 blank (all exams) -> filled in the next chunk
+       score 173 blank -> left out of averages
+       1,909 banked results -> never counted as late (explained in Part D)
+
+
+======================================================================
+ 4. PART C - CLEANING
+======================================================================
+
+CHUNK: cleaning
+  What:  Tidies the student table and the assessments table.
+  How (student table -> studentInfo_clean):
+    recode(imd_band, "10-20" = "10-20%")
+        One band was written without the % sign. Now all match.
+    replace_na(imd_band, "Unknown")
+        Blank deprivation becomes its own group instead of being dropped.
+    factor(..., levels = ...)
+        Puts imd_band, age_band, highest_education and final_result in a
+        sensible order for charts (lowest to highest).
+    completed_flag = final_result %in% c("Distinction", "Pass")
+        TRUE if the student finished successfully. Used all through
+        the report to calculate completion rates.
+  How (assessments -> assessments_clean):
+    left_join(courses) adds module_presentation_length (course length).
+    if_else(is.na(date) & assessment_type == "Exam",
+            module_presentation_length, date)
+        The case study says a blank exam date means "end of the course",
+        so those 11 blanks become the course length.
+  Output: a table of the overall outcome split
+        Distinction 9.3%, Pass 37.9%, Fail 21.6%, Withdrawn 31.2%.
+
+
+======================================================================
+ 5. PART D - BUILDING THE MASTER TABLE
+======================================================================
+
+CHUNK: master-table   (the most important chunk)
+  What:  Squeezes all 7 tables into ONE table called "master", with
+         exactly one row per student per module-run (32,593 rows).
+
+  A. Summarise 10.6 million clicks (data.table):
+       vle_summary <- studentVle[, .(
+         total_clicks         = sum(sum_click),
+         active_days          = uniqueN(date),
+         last_active_day      = max(date),
+         clicks_before_start  = sum(sum_click[date < 0]),
+         clicks_first_14_days = sum(sum_click[date >= 0 & date < 14])
+       ), by = .(code_module, code_presentation, id_student)]
+     - sum(sum_click)        all clicks by the student
+     - uniqueN(date)         number of different days they clicked
+     - max(date)             the last day they clicked (used in Part J)
+     - sum_click[date < 0]   only clicks before day 0 (before the start)
+     - date >= 0 & date < 14 only clicks in days 0-13 (first two weeks)
+
+  B. Summarise assignments (non-exam only):
+     non_exam       all assessments that are not exams
+     available      how many non-exam assessments each module-run has
+     first_assess   the earliest assessment in each module-run
+                    (arrange by date, then slice(1) per group)
+     subs           every submission, with its module and due date attached
+                    (inner_join to non_exam). It also adds:
+                      is_late = is_banked == 0 & date_submitted > due_date
+                    A banked result was handed in during an earlier run,
+                    so its date cannot be compared with this run's due date;
+                    it is never counted as late.
+     assess_summary one row per student:
+                      n_submitted  how many they handed in
+                      n_timed      how many can be judged for lateness
+                                   (not banked)
+                      avg_score    their average mark (blanks ignored)
+                      n_late       how many were late
+     first_sub      which students handed in their module's first assessment
+
+  C. Join everything:
+       master <- studentInfo_clean %>%
+         left_join(studentRegistration) %>%    registration dates
+         left_join(courses) %>%                course length
+         left_join(vle_summary) %>%            clicks
+         left_join(available) %>%              number of assessments
+         left_join(assess_summary) %>%         submissions and marks
+         left_join(first_sub)                  handed in first assessment?
+     left_join keeps every student, even those with no clicks or no
+     submissions. For them the new columns are blank (NA), so:
+       replace_na(.x, 0)  -> no clicks or submissions means 0, not blank
+       submit_rate   = n_submitted / n_assess_available
+       never_clicked = total_clicks == 0
+
+  Then:
+    nrow(master) prints 32593, proving the joins did not create
+    duplicate rows.
+    A first comparison table shows medians and averages for the four
+    result groups (e.g. median clicks: Pass 1,343 vs Withdrawn 89).
+
+  Why:   Almost every question in the brief needs data from several
+         tables at once. One tidy row per student makes every later
+         analysis a simple group_by + summarise.
+
+
+======================================================================
+ 6. PART E - WHO ENROLS, AND DOES IT MATTER?
+======================================================================
+
+CHUNK: groups-and-colours
+  What:  Makes two simple groupings, and fixes one colour per result.
+  How:
+    cut(studied_credits, breaks = c(0, 60, 120, Inf), labels = ...)
+        puts credits into 3 bands: "60 or less", "61-120",
+        "More than 120".
+    attempt_group = if_else(num_of_prev_attempts > 0, "Repeat",
+                            "First attempt")
+    outcome_colours: Distinction dark green, Pass light green,
+        Fail light orange, Withdrawn dark red. Used in every chart so the
+        same result always has the same colour.
+
+CHUNK: enrolment-profile
+  What:  Bar charts of who signs up.
+  How:   pivot_longer() turns 6 columns (gender, age, education, ...)
+         into one long list, count() counts each group, and
+         facet_wrap() draws one small chart per characteristic.
+
+CHUNK: outcome-function
+  What:  A reusable function, plot_outcome(var, label).
+  How:   Give it any column; it counts results per group, turns the
+         counts into shares, and draws a stacked, sideways bar chart.
+         {{ var }} lets us pass a column name into the function.
+  Why:   We need the same kind of chart about 10 times. A function
+         avoids copying the same 15 lines 10 times.
+
+CHUNK: outcome-by-group
+  What:  Uses plot_outcome() for credits, education, deprivation and
+         repeat attempts.
+  Result: workload shows the steepest pattern
+          (25.4% -> 38.7% -> 51.3% withdrawal).
+
+CHUNK: chi-square-tests
+  What:  Tests which background factors are linked to the final result,
+         and how strongly.
+  How:   For each factor:
+           tab  <- table(master[[v]], master$final_result)
+           test <- chisq.test(tab)
+         Cramér's V = sqrt( chi-square / (n * (smaller table size - 1)) )
+         map_dfr() runs this for all 9 factors and stacks the results.
+         arrange(desc(cramers_v)) sorts from strongest to weakest.
+  Why:   With 32,593 students, almost every difference is "significant"
+         (tiny p-value). Cramér's V measures the STRENGTH of a link
+         (0 = none, 1 = perfect), so the factors can be ranked fairly.
+  Result: all links are weak (V below 0.13); credit load, repeat
+          attempts and module are practically tied at the top;
+          gender has almost no link (V = 0.023).
+
+
+======================================================================
+ 7. PART F - WHERE AND WHEN STUDENTS LEAVE
+======================================================================
+
+CHUNK: outcome-by-module
+  What:  Results for each of the 7 modules (AAA to GGG).
+  Result: withdrawal from 11.5% (GGG) to 44.5% (CCC).
+
+CHUNK: withdrawal-heatmap
+  What:  A coloured grid: withdrawal rate for every module in every year.
+  How:   group_by(module, presentation) + summarise(withdrawal rate),
+         then geom_tile(). Blank squares = module not run that year.
+
+CHUNK: outcome-by-presentation
+  What:  Results by year, plus a FAIR comparison.
+  How:   both_years = modules that ran in BOTH 2013J and 2014J
+         (count presentations per module, keep those with 2).
+         bind_rows() puts two versions side by side: all modules, and
+         same modules only. pivot_wider() shows years as columns.
+  Why:   CCC (the worst module) only started in 2014, so comparing all
+         modules makes 2014 look worse than it is.
+  Result: 26.8% -> 34.0% (all modules) but 26.8% -> 31.4% (same modules).
+
+CHUNK: withdrawal-timing
+  What:  WHEN withdrawn students leave.
+  How:   withdrawn = withdrawn students with an unregistration date
+         (10,063 of 10,156). geom_histogram(binwidth = 7) draws one bar
+         per week. cut() puts days into periods (on or before day 0,
+         days 1-30, ...) and cumsum() gives the running total.
+  Result: 30.7% leave on or before day 0; 50.9% by day 30.
+
+
+======================================================================
+ 8. PART G - HOW STUDENTS ENGAGE (CLICKS)
+======================================================================
+
+CHUNK: weekly-engagement
+  What:  Average clicks per week for each result group.
+  How:   The final result is attached to the click log with a
+         data.table join:
+           vle_out <- studentVle[outcomes_dt, on = k3, nomatch = 0]
+         (as.integer(id_student) first makes the ID types match).
+         week = floor(date / 7) turns days into weeks.
+         Clicks are summed per week and group, then divided by the number
+         of students in the group (group_sizes).
+  Result: the gap between groups opens in week 0; failing students fade
+          steadily.
+
+CHUNK: early-engagement
+  What:  How the first two weeks, and clicking before the start, relate
+         to results.
+  How:   early_clicks_band = cut(clicks_first_14_days,
+                                 breaks = c(-Inf, 0, 50, 150, Inf))
+         -> bands "0", "1-50", "51-150", "151+". Fixed bands are used,
+         not quartiles, because 18.9% of students have exactly 0.
+         clicked_before_start has THREE groups:
+           "Yes", "No, but clicked later", "Never clicked at all".
+  Why:   Keeping never-clickers separate is a fairness fix. With a simple
+         Yes/No split, the "No" group included everyone who never
+         clicked, which made pre-start clicking look far more important
+         (24.2% vs 50.0%) than it is (24.2% vs 25.9%).
+
+CHUNK: never-clicked
+  What:  What happened to students with zero clicks all course.
+  Result: 3,365 students; 88.8% withdrew.
+
+CHUNK: activity-types
+  What:  Which kinds of pages (forum, quiz, content ...) each group uses.
+  How:   Clicks per page (id_site) per group, joined to vle to get the
+         activity_type, then summed per type. slice_max(total, n = 6)
+         keeps the 6 most-used types. Two outputs: clicks per student,
+         and each type's share of the group's clicks.
+  Result: the main difference is volume (Pass students click oucontent
+          about 7.5x more), not the mix of pages.
+
+
+======================================================================
+ 9. PART H - ASSESSMENT BEHAVIOUR
+======================================================================
+
+CHUNK: first-assessment
+  What:  Labels each student's first assignment: On time, Late or
+         Not submitted, and compares results.
+  How:   semi_join(first_assess) keeps only first-assessment submissions.
+         first_assessment = if_else(is_late, "Late", "On time");
+         students with no submission become "Not submitted".
+         FAIR CHECK: first_due_date is attached and
+           left_before_first_due = date_unregistration <= first_due_date
+         Then results are compared ONLY for students still registered
+         on the due date.
+  Why:   4,405 of the 7,208 "missed" students had already left before it
+         was due. Counting them would blame the assignment for something
+         that had already happened (cause and effect reversed).
+  Result: among students still registered, missed -> 4.7% complete,
+          on time -> 65.6%.
+  Note:  select(-any_of("first_assessment")) at the start removes the
+         column if it already exists, so the chunk can be run twice
+         without creating duplicate columns.
+
+CHUNK: submission-sequence
+  What:  How hand-ins drop off across the first 4 assignments.
+  How:   row_number() numbers each module's assessments in date order.
+         Every student is paired with every one of their first 4
+         assessments (inner_join, many-to-many), then left_join shows
+         whether they submitted (1) or not (0). The mean is the share
+         submitting.
+  Result: failing students fade 79% -> 63% -> 52% -> 42%.
+
+CHUNK: silent-fail
+  What:  Shows that failing students mostly stop handing work in,
+         rather than scoring badly.
+  How:   geom_boxplot() of submit_rate and avg_score by result; a small
+         table of key facts; and the share of late submissions
+         (sum(n_late) / sum(n_timed), so banked results are left out).
+  Result: median hand-in rate Fail 36.4% vs Pass 100%; median marks
+          66.2 vs 78.2.
+
+CHUNK: exam-coverage
+  What:  Counts recorded exam submissions per module.
+  Result: only CCC and DDD have exam results, so exams are left out of
+          the assessment analysis.
+
+
+======================================================================
+ 10. PART I - WHERE THE PROBLEM CONCENTRATES
+======================================================================
+
+CHUNK: concentration-setup
+  What:  Makes two new groupings.
+  How:   deprivation_group: 0-30%, 30-70%, 70-100%, Unknown
+         (case_when on imd_band).
+         engagement_segment, built only from what students did:
+           1. Never clicked
+           2. Clicked, missed first assessment
+           3. Submitted first, then fewer than half
+           4. Submitted at least half
+         case_when checks the conditions in order, so each student lands
+         in the first segment that fits.
+
+CHUNK: credit-deprivation
+  What:  Heatmap of completion by workload x deprivation.
+  Result: worst combination: 0-30% band with >120 credits, 22.4% complete.
+
+CHUNK: module-deprivation
+  What:  Heatmap of completion by module x deprivation.
+  Result: the deprivation gap appears in almost every module.
+
+CHUNK: engagement-segments
+  What:  Where the non-completers are.
+  How:   Per segment: students, completion rate, non-completers; then
+         each segment's share of all students and of all non-completers.
+  Result: segments 1-3 are 40.4% of students but 75.5% of
+          non-completers ("two universities in one").
+  Caution: withdrawing itself stops clicking and submitting, so this
+           shows where losses sit, not what caused them.
+
+CHUNK: deprivation-within-segments
+  What:  Does the deprivation gap shrink once students engage?
+  How:   mean(completed_flag[engagement_segment == "4. Submitted at least
+         half"]) takes the completion rate only within segment 4.
+  Result: gap 15.9 points overall, 8.3 points among engaged students.
+
+
+======================================================================
+ 11. PART J - OUR INNOVATION: THE SILENT STAYERS
+======================================================================
+
+CHUNK: silent-stayers
+  What:  Finds a third group of students that official records do not
+         show, and profiles them.
+  Idea:  Official records only have "withdrew" or "stayed". But some
+         students who "stayed" had stopped taking part long before the
+         end. We call them SILENT STAYERS.
+  How (the 4 steps):
+    1) Each student's last click day comes from Part D (last_active_day).
+    2) Compare it with the course length:
+         last_active_pct = pmax(last_active_day, 0) /
+                           module_presentation_length
+       (0 = day 0, 1 = last day; pmax(..., 0) treats pre-start clicks as 0)
+    3) Put every student in one of three segments:
+         student_segment = case_when(
+           final_result == "Withdrawn"            ~ "Official quitters",
+           never_clicked | last_active_pct < 0.5  ~ "Silent stayers",
+           TRUE                                   ~ "Active stayers")
+       So a silent stayer did NOT withdraw, but made no clicks after the
+       halfway point (or never clicked).
+    4) Profile the three segments side by side: last click, first
+       assignment, average score, heavy workload, repeat attempts,
+       education, deprivation. Also a histogram of when silent stayers
+       went quiet, and a table by module.
+  Result:
+    Active stayers 58.6% | Silent stayers 10.2% | Official quitters 31.2%
+    99.8% of silent stayers end with a Fail.
+    They start well (61% handed in the first assignment, average mark 65),
+    go quiet in the first half (median day 53, about week 8), rarely have a
+    heavy workload (5%), and are more often repeat, less-qualified and
+    deprived students.
+  Why it matters:
+    They need a different strategy from quitters. Quitters are lost at
+    the front door, so fix the start. Silent stayers are still
+    registered, so they can be re-engaged mid-course: tutor contact after
+    3 silent weeks, a catch-up plan, or a pause instead of a Fail.
+  Limitation: "no clicks after halfway" is a simple cut-off we chose;
+    a student could still study offline.
+
+
+======================================================================
+ 12. ANSWER TO THE BOARD
+======================================================================
+
+CHUNK: key-figures
+  What:  One summary table of all the headline numbers.
+  How:   A tibble() with two columns, measure and value. Each value is
+         calculated live from master (e.g.
+         percent(mean(master$completed_flag), 0.1)), so if the data
+         changed, the table would update itself.
+  Then the text sections 12.2-12.5 answer the Board's question,
+  list recommendations, limitations and the conclusion.
+
+
+======================================================================
+ 13. APPENDIX - THE DAY-14 TRAFFIC LIGHT (OUTSIDE THE BRIEF)
+======================================================================
+
+CHUNK: traffic-light
+  Why an appendix: the Board asked for "not a forecast, not an
+    early-warning model". This is an idea for later only, and is NOT
+    part of our answer.
+  What:  Gives each student one point per warning sign known by day 14:
+           flag_low_activity  fewer than 50 clicks in days 0-13
+           flag_heavy_load    more than 120 credits
+           flag_repeat        repeating the module
+           flag_low_prior_ed  education below A level
+         warning_points = sum of the TRUE flags (TRUE counts as 1).
+         0 points = Green, 1 = Amber, 2 or more = Red.
+         Only students still registered on day 14 are included.
+  Result: completion Green 71.7%, Amber 53.7%, Red 35.4%.
+
+
+======================================================================
+ 14. GLOSSARY OF THE COLUMNS IN THE MASTER TABLE
+======================================================================
+
+ From the original data
+  code_module            module (course) name, AAA to GGG
+  code_presentation      run of the module, e.g. 2014J
+                         (B = starts February, J = starts October)
+  id_student             student ID
+  final_result           Distinction / Pass / Fail / Withdrawn
+  studied_credits        how much study the student signed up for
+  num_of_prev_attempts   how many times they tried the module before
+  imd_band               deprivation band of their area (0-10% = most deprived)
+  date_registration      day they registered (negative = before the start)
+  date_unregistration    day they withdrew (blank = did not withdraw)
+  module_presentation_length   length of the course in days
+
+ Built by us
+  completed_flag         TRUE if Distinction or Pass
+  total_clicks           all clicks in the course
+  active_days            number of different days with clicks
+  last_active_day        last day with a click
+  clicks_before_start    clicks before day 0
+  clicks_first_14_days   clicks in days 0-13
+  n_submitted            non-exam assignments handed in
+  n_timed                of those, how many can be judged for lateness
+  n_late                 of those, how many were late
+  avg_score              average mark on handed-in assignments
+  submitted_first        TRUE if the first assignment was handed in
+  submit_rate            n_submitted / number of assignments available
+  never_clicked          TRUE if total_clicks is 0
+  credit_group           credits in 3 bands
+  attempt_group          First attempt / Repeat
+  early_clicks_band      clicks in days 0-13, in 4 bands
+  clicked_before_start   Yes / No, but clicked later / Never clicked at all
+  first_assessment       On time / Late / Not submitted
+  left_before_first_due  TRUE if they withdrew before the first due date
+  deprivation_group      0-30% / 30-70% / 70-100% / Unknown
+  engagement_segment     the 4 engagement segments (Part I)
+  last_active_pct        last active day as a share of course length
+  student_segment        Active stayers / Silent stayers / Official quitters
+
+
+======================================================================
+ 15. COMMON QUESTIONS ABOUT THE CODE
+======================================================================
+
+Q: Why do we use both dplyr and data.table?
+A: dplyr is easier to read, so we use it almost everywhere. data.table is
+   much faster on huge data, so we use it only for the 10.6-million-row
+   click file.
+
+Q: Why left_join and not inner_join when building master?
+A: left_join keeps every student, even those with no clicks or no
+   submissions. inner_join would silently drop them, and they are
+   exactly the students we most need to see (e.g. the 3,365 who never
+   clicked).
+
+Q: Why do some chunks start with select(-any_of("..."))?
+A: It removes a column if it already exists. This lets you re-run a chunk
+   by hand in RStudio without creating a second copy of the column.
+
+Q: Why is mean(x == "Withdrawn") a percentage?
+A: x == "Withdrawn" gives TRUE/FALSE for each row. R treats TRUE as 1 and
+   FALSE as 0, so the mean is the share of TRUE values.
+
+Q: Why suppressWarnings(chisq.test(...))?
+A: chisq.test warns when some table cells are small. With 32,593 students
+   this does not affect the result, so the warning is hidden.
+
+Q: Why are the numbers in the text typed in, not calculated?
+A: Most tables and charts are calculated live. The explanation text
+   repeats key numbers by hand for readability. If the data changes, re-knit
+   and check the text against the tables.
+
+Q: What is the difference between the 4 engagement segments (Part I) and
+   the 3 student segments (Part J)?
+A: The 4 engagement segments group students by how much work they handed
+   in. The 3 student segments split students by whether they withdrew,
+   and if not, whether they were still active after halfway. Part J is our
+   innovation: it finds the silent stayers that the official records hide.
+
+======================================================================
+ END
+======================================================================

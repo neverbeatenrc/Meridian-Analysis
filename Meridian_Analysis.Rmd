@@ -1,0 +1,1387 @@
+---
+title: 'Meridian Open University: Board Review'
+author: "The R five: Divyanshi, Jatin, Chaarvi, Anubhav, Arsee"
+date: "2026-09-28"
+output:
+  html_document:
+    code_folding: show
+---
+
+
+# Part A: Introduction
+## 1. Business context
+
+
+Meridian Open University is a distance-learning provider. Students enroll in individual modules, study remotely, and interact with the university almost entirely through a virtual learning environment (VLE), where every click is logged.
+
+Roughly a third of registrations end in withdrawal. This has long been treated as
+the price of the university's access mission. The Board has asked:
+
+> "Based on everything in this data, what kind of institution are we, and what
+> should that tell us about where to focus in 2016?"
+
+This report answers that question from the present data (not a forecast or an
+early-warning model) by examining who enrols, how students engage, and where
+outcomes are healthy or failing.
+
+### Analysis objectives
+
+To answer the Board, the analysis works through six questions in order. Each part
+of the report answers one of them:
+
+1. **Can the data be trusted?** Check keys, links and missing values, then clean
+   and combine the seven tables into one (Parts B to D).
+2. **Who enrols, and does it matter?** Profile the students and test which
+   background factors are linked to results (Part E).
+3. **Where and when do students leave?** Compare modules and years, and find when
+   withdrawals happen (Part F).
+4. **How do healthy and troubled students behave?** Compare clicks and assessment
+   behaviour (Parts G and H).
+5. **Where is the problem concentrated?** Group students by what they did and find
+   where the non-completers sit (Part I).
+6. **Is anything hidden in the official figures?** Use the click data to find
+   students who stopped taking part without withdrawing (Part J, our innovation).
+
+The report ends with the answer to the Board and our recommendations for 2016.
+
+## 2. Data loading
+
+```{r setup, message=FALSE, warning=FALSE}
+# WHAT THIS CHUNK DOES: Load the packages (toolboxes) the whole report uses
+# Hide package and file-reading messages in the report
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+# Load the packages we need
+library(tidyverse)   # data handling and charts
+library(data.table)  # fast file reading for the big click file
+library(scales)      # nicer percentage labels on charts
+library(knitr)       # neat tables in the html report
+```
+
+```{r load-data}
+# WHAT THIS CHUNK DOES: Read the 7 data files into R and count their rows
+# Read the six smaller tables
+studentInfo         <- read_csv("Data/studentInfo.csv")
+studentRegistration <- read_csv("Data/studentRegistration.csv")
+courses             <- read_csv("Data/courses.csv")
+assessments         <- read_csv("Data/assessments.csv")
+studentAssessment   <- read_csv("Data/studentAssessment.csv")
+vle                 <- read_csv("Data/vle.csv")
+
+# The click file is very large, so we use fread, which is much faster
+studentVle <- fread("Data/studentVle.csv")
+
+# Check how many rows and columns each table has
+tibble(
+  table = c("studentInfo", "studentRegistration", "courses", "assessments",
+            "studentAssessment", "vle", "studentVle"),
+  rows  = c(nrow(studentInfo), nrow(studentRegistration), nrow(courses),
+            nrow(assessments), nrow(studentAssessment), nrow(vle), nrow(studentVle))
+)
+```
+
+All seven tables loaded; the row count of each is shown in the table above.
+
+# Part B: Checking the keys, links, and missing values
+## 3. Data quality checks
+
+```{r data-checks}
+# WHAT THIS CHUNK DOES: Check the data can be trusted: unique IDs, working links, missing values
+# The three columns that identify one student in one module-run
+k3 <- c("code_module", "code_presentation", "id_student")
+
+# A small helper: TRUE if the given columns uniquely identify every row
+is_unique <- function(df, cols) {
+  nrow(dplyr::distinct(df, dplyr::across(tidyselect::all_of(cols)))) == nrow(df)
+}
+
+# 1. Primary key checks
+tibble(
+  table = c("studentInfo", "studentRegistration", "courses",
+            "assessments", "studentAssessment", "vle"),
+  key   = c("module + presentation + student", "module + presentation + student",
+            "module + presentation", "id_assessment",
+            "id_assessment + id_student", "id_site"),
+  unique = c(is_unique(studentInfo, k3),
+             is_unique(studentRegistration, k3),
+             is_unique(courses, c("code_module", "code_presentation")),
+             is_unique(assessments, "id_assessment"),
+             is_unique(studentAssessment, c("id_assessment", "id_student")),
+             is_unique(vle, "id_site"))
+) %>% kable(caption = "Primary key checks")
+
+# 2. Link checks: how many rows fail to find a match (0 = all linked)
+tibble(
+  link = c("studentRegistration -> studentInfo",
+           "studentInfo -> courses",
+           "assessments -> courses",
+           "vle -> courses",
+           "studentAssessment -> assessments",
+           "studentVle -> vle",
+           "studentVle -> studentInfo"),
+  unmatched_rows = c(nrow(anti_join(studentRegistration, studentInfo, by = k3)),
+                     nrow(anti_join(studentInfo, courses,
+                                    by = c("code_module", "code_presentation"))),
+                     nrow(anti_join(assessments, courses,
+                                    by = c("code_module", "code_presentation"))),
+                     nrow(anti_join(vle, courses,
+                                    by = c("code_module", "code_presentation"))),
+                     sum(!studentAssessment$id_assessment %in% assessments$id_assessment),
+                     sum(!studentVle$id_site %in% vle$id_site),
+                     nrow(anti_join(as_tibble(unique(studentVle[, ..k3])),
+                                    studentInfo, by = k3)))
+) %>% kable(caption = "Link checks")
+
+# 3. Missing values in each table (only columns with at least one gap)
+list(studentInfo = studentInfo, studentRegistration = studentRegistration,
+     courses = courses, assessments = assessments,
+     studentAssessment = studentAssessment, vle = vle) %>%
+  map_dfr(~ tibble(column = names(.x), missing = colSums(is.na(.x))), .id = "table") %>%
+  filter(missing > 0) %>%
+  kable(caption = "Missing values")
+```
+All primary keys are unique and all seven links checked above match, so the tables
+can be joined safely. Note that id_student alone is not unique: some students
+appear in more than one module-run, so joins always use module, presentation and
+student together.
+
+Missing values and how we treat them:
+
+- **imd_band (1,111 missing):** kept as a separate "Unknown" group rather than dropped.
+- **date_registration (45 missing):** left as missing; these students are kept.
+- **date_unregistration (22,521 missing):** almost all students who did not withdraw
+  have no date here (10,063 of 10,156 withdrawn students have a date), so a blank is
+  read as "did not unregister". Only 9 students who did not withdraw have a date;
+  they are left as they are.
+- **Assessment date (11 missing):** all 11 are Exams. As stated in the case, a null
+  exam date means the end of the presentation, so we fill it with the module length.
+- **score (173 missing):** submissions with no recorded score; excluded from score averages.
+- **is_banked (1,909 rows = 1):** results carried over from an earlier presentation.
+  They still count as submitted, but their submission date belongs to the earlier
+  run, so they are left out of every "late" / "on time" check.
+- **week_from / week_to (5,243 missing):** not used in this analysis.
+
+# Part C: Clean the data
+## 4. Data cleaning
+
+```{r cleaning}
+# WHAT THIS CHUNK DOES: Fix messy labels, fill blank exam dates, and order categories for charts
+# Clean the student table
+studentInfo_clean <- studentInfo %>%
+  mutate(
+    # One band is written "10-20" without the % sign; make it consistent
+    imd_band = recode(imd_band, "10-20" = "10-20%"),
+    # Keep missing deprivation as its own group
+    imd_band = replace_na(imd_band, "Unknown"),
+    imd_band = factor(imd_band, levels = c("0-10%", "10-20%", "20-30%", "30-40%",
+                                           "40-50%", "50-60%", "60-70%", "70-80%",
+                                           "80-90%", "90-100%", "Unknown")),
+    # Put categories in a sensible order for charts
+    age_band = factor(age_band, levels = c("0-35", "35-55", "55<=")),
+    highest_education = factor(highest_education,
+                               levels = c("No Formal quals", "Lower Than A Level",
+                                          "A Level or Equivalent", "HE Qualification",
+                                          "Post Graduate Qualification")),
+    final_result = factor(final_result,
+                          levels = c("Distinction", "Pass", "Fail", "Withdrawn")),
+    # A simple two-group version of the outcome (TRUE = Distinction or Pass)
+    completed_flag = final_result %in% c("Distinction", "Pass")
+  )
+
+# Fill the 11 blank exam dates with the module length (end of presentation)
+assessments_clean <- assessments %>%
+  left_join(courses, by = c("code_module", "code_presentation")) %>%
+  mutate(date = if_else(is.na(date) & assessment_type == "Exam",
+                        module_presentation_length, date))
+
+# Quick check: overall outcome split
+studentInfo_clean %>%
+  count(final_result) %>%
+  mutate(share = percent(n / sum(n), accuracy = 0.1)) %>%
+  kable(caption = "Final results across all registrations")
+```
+
+
+Cleaning steps: the "10-20" deprivation band was relabeled "10-20%" for
+consistency; missing deprivation was set to "Unknown"; categories were put in a
+logical order for charts; the 11 blank exam dates were set to the module length;
+and a two-group completed / not completed flag was added (completed =
+Distinction or Pass).
+
+Only 47.2% of registrations end in completion. Withdrawal (31.2%) is the single
+largest non-completion outcome, and a further 21.6% fail.
+
+**Interpretations** (not stated in the data or case):
+
+- Day 0 is taken as the module start date; negative days are before the start.
+- The education levels are ordered from lowest to highest by their names.
+- The 0-10% deprivation band is read as the most deprived; the data does not state
+  the direction, but this band has the lowest completion.
+
+# Part D : Combine the data
+## 5. Building the student-level master table
+
+
+```{r master-table}
+# WHAT THIS CHUNK DOES: Build one big table: one row per student per module, with their clicks and assignments
+# ---- A. Summarise the click log to one row per student per module-run ----
+# data.table syntax is used here because studentVle has 10.6 million rows
+vle_summary <- studentVle[, .(
+  total_clicks         = sum(sum_click),
+  active_days          = uniqueN(date),
+  last_active_day      = max(date),
+  clicks_before_start  = sum(sum_click[date < 0]),
+  clicks_first_14_days = sum(sum_click[date >= 0 & date < 14])
+), by = .(code_module, code_presentation, id_student)] %>%
+  as_tibble()
+
+# ---- B. Summarise assessments (non-exam only) ----
+non_exam <- assessments_clean %>% filter(assessment_type != "Exam")
+
+# How many non-exam assessments each module-run has
+available <- non_exam %>%
+  count(code_module, code_presentation, name = "n_assess_available")
+
+# The first assessment of each module-run (earliest date)
+first_assess <- non_exam %>%
+  arrange(code_module, code_presentation, date, id_assessment) %>%
+  group_by(code_module, code_presentation) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(code_module, code_presentation, id_assessment)
+
+# Attach module, presentation and due date to every submission
+subs <- studentAssessment %>%
+  inner_join(non_exam %>% select(id_assessment, code_module,
+                                 code_presentation, due_date = date),
+             by = "id_assessment") %>%
+  # Banked results were submitted in an earlier run, so their date cannot be
+  # compared with this run's due date: never count them as late
+  mutate(is_late = is_banked == 0 & date_submitted > due_date)
+
+# One row per student: how many submitted, average score, how many late
+assess_summary <- subs %>%
+  group_by(code_module, code_presentation, id_student) %>%
+  summarise(n_submitted = n(),
+            n_timed     = sum(is_banked == 0),   # submissions whose timing can be judged
+            avg_score   = mean(score, na.rm = TRUE),
+            n_late      = sum(is_late, na.rm = TRUE),
+            .groups = "drop")
+
+# Which students submitted their module's first assessment
+first_sub <- subs %>%
+  semi_join(first_assess,
+            by = c("code_module", "code_presentation", "id_assessment")) %>%
+  distinct(code_module, code_presentation, id_student) %>%
+  mutate(submitted_first = TRUE)
+
+# ---- C. Join everything onto the student table ----
+master <- studentInfo_clean %>%
+  left_join(studentRegistration, by = k3) %>%
+  left_join(courses, by = c("code_module", "code_presentation")) %>%
+  left_join(vle_summary, by = k3) %>%
+  left_join(available, by = c("code_module", "code_presentation")) %>%
+  left_join(assess_summary, by = k3) %>%
+  left_join(first_sub, by = k3) %>%
+  mutate(
+    # No rows in the click log or submissions = zero activity
+    across(c(total_clicks, active_days, clicks_before_start,
+             clicks_first_14_days, n_submitted, n_timed, n_late), ~ replace_na(.x, 0)),
+    submitted_first = replace_na(submitted_first, FALSE),
+    submit_rate     = n_submitted / n_assess_available,
+    never_clicked   = total_clicks == 0
+  )
+
+# Check: still one row per student per module-run?
+nrow(master)
+
+# First look: how the four outcome groups differ
+master %>%
+  group_by(final_result) %>%
+  summarise(students            = n(),
+            median_clicks       = median(total_clicks),
+            median_active_days  = median(active_days),
+            median_clicks_first_14_days = median(clicks_first_14_days),
+            pct_never_clicked   = percent(mean(never_clicked), 0.1),
+            avg_submit_rate     = percent(mean(submit_rate), 0.1),
+            avg_score           = round(mean(avg_score, na.rm = TRUE), 1),
+            pct_submitted_first = percent(mean(submitted_first), 0.1)) %>%
+  kable(caption = "How the four outcome groups differ")
+```
+
+The seven tables are now combined into one master table: 32,593 rows, one per
+student per module-run. Click activity and assessment behaviour have been
+summarised for each student. Exams are excluded from the assessment summary
+because exam scores are recorded for only some modules.
+
+This first comparison already shows a very large gap between the groups:
+
+- **Completers are heavily engaged.** A typical Pass student made 1,343 clicks on
+  78 different days and submitted about 96% of assessments.
+- **Withdrawn students barely engaged at all.** The typical withdrawn student
+  clicked on only 7 days, and 29.4% never clicked once.
+- **Failing students look more like withdrawn students than passing ones.** They
+  submitted on average only 44.6% of their assessments, but when they did submit,
+  they averaged 64.6, compared with 76.5 for Pass students. The gap in whether
+  they submit is much larger than the gap in how well they score.
+
+The sections that follow examine each of these patterns in more detail.
+
+# Part E1: Add grouping columns and a chart color scheme
+## 6. Who enrolls, and does it matter?
+
+```{r groups-and-colours}
+# WHAT THIS CHUNK DOES: Group credits and repeat attempts, and fix one colour per result for all charts
+# Group credits and previous attempts into simple categories
+master <- master %>%
+  mutate(
+    credit_group  = cut(studied_credits, breaks = c(0, 60, 120, Inf),
+                        labels = c("60 or less", "61-120", "More than 120")),
+    attempt_group = if_else(num_of_prev_attempts > 0, "Repeat", "First attempt")
+  )
+
+# One fixed colour per outcome, used in every chart
+outcome_colours <- c("Distinction" = "#1b7837", "Pass" = "#7fbf7b",
+                     "Fail" = "#f4a582", "Withdrawn" = "#b2182b")
+```
+
+# Part E2: Profile of who enrolls
+```{r enrolment-profile, fig.height=8, fig.width=9}
+# WHAT THIS CHUNK DOES: Chart who signs up (age, education, credits, and so on)
+master %>%
+  select(gender, age_band, highest_education, disability,
+         credit_group, attempt_group) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(everything(), names_to = "characteristic", values_to = "group") %>%
+  count(characteristic, group) %>%
+  group_by(characteristic) %>%
+  mutate(share = n / sum(n)) %>%
+  ggplot(aes(x = share, y = group)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = if_else(share >= 0.04, percent(share, 1), "")), hjust = -0.1, size = 3) +
+  facet_wrap(~ characteristic, scales = "free_y", ncol = 2) +
+  scale_x_continuous(labels = percent, limits = c(0, 1.1)) +
+  labs(title = "Who enrols at Meridian", x = "Share of registrations", y = NULL)
+```
+
+**Who enrols.** The typical registration is a first attempt (87.2%) by someone under
+35 (70.4%) with A level or lower education (84.6%), taking 60 credits or less
+(63.1%). 54.8% are men and 9.7% declare a disability. Only 6.9% take more than 120
+credits, and 12.8% are repeating the module.
+
+**Business meaning:** Meridian mainly serves younger adults without a degree who are
+taking a light study load. This is the access mission in action. Parts E3 and E4
+test whether these characteristics are actually linked to results.
+
+# Part E3: How outcomes differ by group
+```{r outcome-function}
+# WHAT THIS CHUNK DOES: A reusable function that draws "results by group" for any column
+# Draws a stacked bar of final results for any student characteristic
+plot_outcome <- function(var, label) {
+  outcome_data <- dplyr::count(master, {{ var }}, rlang::.data$final_result) |>
+    dplyr::group_by({{ var }}) |>
+    dplyr::mutate(share = rlang::.data$n / sum(rlang::.data$n)) |>
+    dplyr::ungroup()
+
+  ggplot2::ggplot(
+    outcome_data,
+    ggplot2::aes(x = {{ var }}, y = rlang::.data$share,
+                 fill = rlang::.data$final_result)
+  ) +
+    ggplot2::geom_col() +
+    ggplot2::geom_text(
+      ggplot2::aes(label = scales::percent(rlang::.data$share, 1)),
+      position = ggplot2::position_stack(vjust = 0.5), size = 3
+    ) +
+    ggplot2::coord_flip() +
+    ggplot2::scale_y_continuous(labels = scales::percent) +
+    ggplot2::scale_fill_manual(values = outcome_colours) +
+    ggplot2::labs(title = paste("Final result by", label),
+                  x = NULL, y = "Share of registrations", fill = "Final result")
+}
+```
+```{r outcome-by-group, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: Results by credits, education, deprivation and repeat attempts
+plot_outcome(credit_group, "credits studied")
+plot_outcome(highest_education, "highest education")
+plot_outcome(imd_band, "deprivation band")
+plot_outcome(attempt_group, "previous attempts")
+```
+**Workload** shows the steepest pattern. Withdrawal rises from 25.4% among students
+taking 60 credits or less, to 38.7% at 61-120 credits, and 51.3% above 120 credits.
+
+**Prior education** matters at both ends. Students with no formal qualifications
+withdraw at 42.9% compared with 23.6% for postgraduates, and distinctions rise from
+4.6% to 28.1%.
+
+**Deprivation** follows a steady gradient. Withdrawal falls from 37.2% in the 0-10%
+band to 25.9% in the 90-100% band, and distinctions rise from 5.1% to 14.1%.
+
+**Repeat students** do worse. Among students on a repeat attempt, 31.7% fail and
+only 4.0% achieve a distinction, compared with 20.2% and 10.1% for first attempts.
+
+# Part E4: Which characteristics matter most?
+
+With 32,593 students, almost any difference will be "statistically significant," even a tiny one. So we also calculate Cramér's V, which measures how strong the relationship is on a scale from 0 (no relationship) to 1 (perfect). This lets you rank the factors fairly.
+```{r chi-square-tests}
+# WHAT THIS CHUNK DOES: Test which background factors are linked to results, and how strongly (Cramer's V)
+test_vars <- c("gender", "region", "age_band", "highest_education", "imd_band",
+               "disability", "credit_group", "attempt_group", "code_module")
+
+map_dfr(test_vars, function(v) {
+  tab  <- table(master[[v]], master$final_result)
+  test <- suppressWarnings(chisq.test(tab))
+  tibble(characteristic = v,
+         chi_square = round(unname(test$statistic), 1),
+         df         = unname(test$parameter),
+         p_value    = format.pval(test$p.value, digits = 2),
+         cramers_v  = round(sqrt(unname(test$statistic) /
+                                 (sum(tab) * (min(dim(tab)) - 1))), 3))
+}) %>%
+  arrange(desc(cramers_v)) %>%
+  kable(caption = "Chi-square tests: characteristic vs final result")
+```
+Every characteristic is statistically significant (all p-values below 0.001), which
+is expected with over 32,000 registrations. Cramér's V shows how strong each
+relationship is. All the values are small (none is above 0.13), so each
+characteristic on its own is only weakly linked to outcomes. The top three
+(**credit load, repeat attempts and module**) are practically tied, followed by
+prior education and deprivation. **Gender has almost no relationship with
+outcomes** (V = 0.023).
+
+This matters for the Board: two of the top three (how much a student takes on and
+which module they are on) are things the university can directly influence, rather
+than fixed facts about who the student is. The weak values also show that who a
+student is explains little on its own; what students do (Parts G and H) says far more.
+
+# Part F1: Outcomes by module
+## 7. Where and when: modules, trends and withdrawal timing
+
+```{r outcome-by-module, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: Results for each module (course)
+plot_outcome(code_module, "module")
+```
+Outcomes vary sharply between modules. Withdrawal ranges from 11.5% in GGG and 16.8% in AAA up to 35.9% in DDD and 44.5% in CCC. CCC loses almost half of its registrations to withdrawal. The same student population produces very different results depending on the module, which suggests part of the problem sits in how
+specific modules are run, not only in who enrols.
+
+# Part F2: Is it getting better or worse?
+```{r withdrawal-heatmap, fig.height=5, fig.width=8}
+# WHAT THIS CHUNK DOES: Quit rate for every module in every year, as a coloured grid
+# Withdrawal rate for every module-run
+master %>%
+  group_by(code_module, code_presentation) %>%
+  summarise(withdrawal_rate = mean(final_result == "Withdrawn"),
+            students = n(), .groups = "drop") %>%
+  ggplot(aes(x = code_presentation, y = code_module, fill = withdrawal_rate)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = paste0(percent(withdrawal_rate, 0.1),
+                               "\n(n = ", students, ")")), size = 3) +
+  scale_fill_gradient(low = "#fee0d2", high = "#b2182b", labels = percent) +
+  labs(title = "Withdrawal rate by module and presentation",
+       subtitle = "Blank cells: module not run in that presentation",
+       x = "Presentation", y = "Module", fill = "Withdrawal rate")
+```
+
+**Reading the heatmap.** Each square is one module in one presentation. The darkest
+squares are CCC in 2014B (46.4%) and 2014J (43.1%) and DDD in 2014B (39.9%); the
+lightest are GGG (6.9% in 2013J) and AAA (15.7% to 18.1%). In every module that ran
+in both years, the squares are darker in 2014 than in 2013.
+
+**Business meaning:** the problem is not one bad run. A few modules are consistently
+weak and almost all are getting worse, so the university needs module-level reviews
+as well as support for individual students.
+```{r outcome-by-presentation, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: Results by year, plus a fair comparison using only modules that ran in both years
+plot_outcome(code_presentation, "presentation")
+
+# Fair comparison: the module mix changed between years (CCC, the module with
+# the highest withdrawal, only ran in 2014), so also compare using only the
+# modules that ran in both 2013J and 2014J
+both_years <- master %>%
+  filter(code_presentation %in% c("2013J", "2014J")) %>%
+  distinct(code_module, code_presentation) %>%
+  count(code_module) %>%
+  filter(n == 2) %>%
+  pull(code_module)
+
+bind_rows(
+  master %>% filter(code_presentation %in% c("2013J", "2014J")) %>%
+    mutate(comparison = "All modules"),
+  master %>% filter(code_presentation %in% c("2013J", "2014J"),
+                    code_module %in% both_years) %>%
+    mutate(comparison = paste0("Same modules only (", paste(both_years, collapse = ", "), ")"))
+) %>%
+  group_by(comparison, code_presentation) %>%
+  summarise(withdrawal_rate = percent(mean(final_result == "Withdrawn"), 0.1),
+            .groups = "drop") %>%
+  pivot_wider(names_from = code_presentation, values_from = withdrawal_rate) %>%
+  kable(caption = "Withdrawal rate, 2013J vs 2014J")
+```
+Withdrawal is rising, but part of the headline rise comes from a change in the
+module mix. Across all modules it went from 26.8% in 2013J to 34.0% in 2014J.
+However, CCC, the module with the highest withdrawal, only ran in 2014, which pushes
+the 2014 figure up. Comparing only the six modules that ran in both years, the rise
+is smaller: 26.8% to 31.4%. The rise is real, but about a third of the headline jump
+is caused by adding CCC.
+
+The rise is broad, not confined to one module. Comparing each module's first and last presentation, withdrawal increased in six of the seven modules: GGG from 6.9%
+to 16.8%, FFF from 25.5% to 36.2%, BBB from 28.6% to 32.7%, DDD from 33.2% to 35.9%, EEE from 23.1% to 25.8% and AAA from 15.7% to 18.1%. Only CCC improved (46.4% to 43.1%), and it remains the worst module. CCC's two runs (2014B and 2014J) are only
+a few months apart, so its change is less comparable than the others.
+
+# Part F3: When do students withdraw?
+This is one of strongest findings, so it gets a chart and a table.
+```{r withdrawal-timing, fig.height=4.5, fig.width=9}
+# WHAT THIS CHUNK DOES: When students quit: before the start, in the first month, or later
+# Withdrawn students with a recorded unregistration date
+withdrawn <- master %>%
+  filter(final_result == "Withdrawn", !is.na(date_unregistration))
+
+ggplot(withdrawn, aes(x = date_unregistration)) +
+  geom_histogram(binwidth = 7, fill = "#b2182b", colour = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  annotate("text", x = 5, y = Inf, label = "Day 0",
+           hjust = 0, vjust = 1.5) +
+  labs(title = "When withdrawn students unregister",
+       subtitle = "Each bar is one week",
+       x = "Day of unregistration (relative to day 0)",
+       y = "Number of students")
+
+# Timing in periods, with the running total
+withdrawn %>%
+  mutate(period = cut(date_unregistration,
+                      breaks = c(-Inf, 0, 30, 60, 90, 120, 180, Inf),
+                      labels = c("On or before day 0", "Days 1-30", "Days 31-60",
+                                 "Days 61-90", "Days 91-120", "Days 121-180",
+                                 "After day 180"))) %>%
+  count(period) %>%
+  mutate(share      = percent(n / sum(n), 0.1),
+         cumulative = percent(cumsum(n) / sum(n), 0.1)) %>%
+  kable(caption = "When withdrawals happen")
+
+# Share of each module's withdrawals that happen on or before day 0
+withdrawn %>%
+  group_by(code_module) %>%
+  summarise(withdrawals = n(),
+            pct_on_or_before_day_0 = percent(mean(date_unregistration <= 0), 0.1)) %>%
+  kable(caption = "Withdrawals on or before day 0, by module")
+```
+10,063 of the 10,156 withdrawn students have an unregistration date; the other 93
+are excluded from this timing analysis.
+
+**Withdrawal is front-loaded.** 30.7% of withdrawals happen on or before day 0, and
+half (50.9%) have happened by day 30. By day 60, 61.9% of all withdrawals have
+already occurred. The problem is not mainly students giving up late in a long
+module; a large share leave before the module has started or within its first month.
+
+There is also a smaller second wave between days 121 and 180 (14.9% of withdrawals), which is worth investigating further.
+
+The share leaving on or before day 0 varies by module, from 15.9% in AAA to 41.5%
+in BBB. In BBB, more than two in five withdrawals happen before teaching begins.
+
+**For the Board:** because so many withdrawals happen at or before the start, any
+effort that begins mid-module arrives too late for over half of the students it is
+meant to help. The window that matters most is enrollment through the first month.
+
+# Part G1: Weekly activity by outcome 
+## 8. How students engage
+
+This chart shows, for each outcome group, the average clicks per student in each week of the module.
+```{r weekly-engagement, fig.height=5, fig.width=9}
+# WHAT THIS CHUNK DOES: Average clicks per week for each result group
+# Attach each student's final result to the click log (done once, reused below)
+outcomes_dt <- as.data.table(master %>% select(all_of(k3), final_result))
+outcomes_dt[, id_student := as.integer(id_student)]
+vle_out <- studentVle[outcomes_dt, on = k3, nomatch = 0]
+
+# Total clicks per outcome group per week
+weekly <- vle_out[, .(clicks = sum(sum_click)),
+                  by = .(final_result, week = floor(date / 7))] %>%
+  as_tibble()
+
+group_sizes <- master %>% count(final_result, name = "students")
+
+weekly %>%
+  left_join(group_sizes, by = "final_result") %>%
+  mutate(clicks_per_student = clicks / students) %>%
+  ggplot(aes(x = week, y = clicks_per_student, colour = final_result)) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_colour_manual(values = outcome_colours) +
+  labs(title = "Average weekly clicks per student, by final result",
+       x = "Week (week 0 starts at day 0)", y = "Clicks per student",
+       colour = "Final result")
+```
+All four groups are most active in the first weeks, but the gap opens immediately.
+In week 0, a Withdrawn student averaged 34.7 clicks against 81.1 for a Pass
+student, and their activity then falls towards zero.
+
+Failing students follow a slower version of the same path. In week 0 they were at
+about half the level of Pass students (44.7 vs 81.1 clicks); by week 24 they were at
+about a fifth (8.5 vs 40.4). They did not stop suddenly. They faded steadily,
+while Pass and Distinction students kept returning throughout the module.
+
+# Part G2: The first two weeks and before the start
+```{r early-engagement, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: How clicks in the first 2 weeks (and before the start) relate to results
+master <- master %>%
+  mutate(
+    early_clicks_band = cut(clicks_first_14_days,
+                            breaks = c(-Inf, 0, 50, 150, Inf),
+                            labels = c("0", "1-50", "51-150", "151+")),
+    # Students who never clicked at all are kept as their own group; mixing them
+    # into "No" would make pre-start activity look far more important than it is
+    clicked_before_start = factor(case_when(
+      never_clicked           ~ "Never clicked at all",
+      clicks_before_start > 0 ~ "Yes",
+      TRUE                    ~ "No, but clicked later"),
+      levels = c("Yes", "No, but clicked later", "Never clicked at all"))
+  )
+
+# How many students fall in each band
+master %>% count(early_clicks_band) %>%
+  mutate(share = percent(n / sum(n), 0.1)) %>%
+  kable(caption = "Students by clicks in days 0-13")
+
+plot_outcome(early_clicks_band, "clicks in days 0-13")
+plot_outcome(clicked_before_start, "any clicks before day 0")
+```
+Fixed bands are used rather than quartiles because 18.9% of students made no clicks
+at all in days 0-13; quartiles would split identical students into different groups.
+
+**The first two weeks separate the groups clearly.** Of students with zero clicks in
+days 0-13 (6,168 students), 67.8% withdrew and only 12.4% completed. Among students
+with more than 150 clicks, withdrawal was 16.5% and 69.1% completed.
+
+**Activity before the start matters much less than it first appears.** A simple
+Yes/No split suggests a big gap (24.2% vs 50.0% withdrawal), but the "No" group
+includes the 3,365 students who never clicked at all, 88.8% of whom withdrew.
+Comparing like with like, students who clicked before day 0 withdrew at 24.2% and
+students who first clicked after day 0 withdrew at 25.9%, almost the same. The real
+warning sign is never engaging at all, not the timing of the first click.
+
+This is a description of what has already happened, not a prediction model: it
+shows that students who end up withdrawing were visibly disengaged from the very
+beginning.
+
+# Part G3: Students who never engaged at all
+```{r never-clicked}
+# WHAT THIS CHUNK DOES: What happened to students who never clicked at all
+master %>%
+  filter(never_clicked) %>%
+  count(final_result) %>%
+  mutate(share = percent(n / sum(n), 0.1)) %>%
+  kable(caption = "Final result of students with zero clicks in the whole module")
+```
+3,365 registrations (10.3% of all) have no clicks at all in the click log. 88.8%
+of them withdrew and 11.1% failed. These students registered but never engaged with
+the module, so for them the problem sits entirely at the point of enrollment.
+
+# Part G4: What students use
+```{r activity-types, fig.height=5, fig.width=9}
+# WHAT THIS CHUNK DOES: Which kinds of pages each group uses, and how much
+# Clicks per page type per outcome group
+site_clicks <- vle_out[, .(clicks = sum(sum_click)),
+                       by = .(id_site, final_result)] %>%
+  as_tibble() %>%
+  left_join(vle %>% select(id_site, activity_type), by = "id_site")
+
+activity <- site_clicks %>%
+  group_by(activity_type, final_result) %>%
+  summarise(clicks = sum(clicks), .groups = "drop") %>%
+  left_join(group_sizes, by = "final_result") %>%
+  mutate(clicks_per_student = clicks / students) %>%
+  group_by(final_result) %>%
+  mutate(share_of_group_clicks = clicks / sum(clicks)) %>%
+  ungroup()
+
+# The six most-used page types
+top_types <- activity %>%
+  group_by(activity_type) %>%
+  summarise(total = sum(clicks)) %>%
+  slice_max(total, n = 6) %>%
+  pull(activity_type)
+
+activity %>%
+  filter(activity_type %in% top_types) %>%
+  ggplot(aes(x = reorder(activity_type, -clicks), y = clicks_per_student,
+             fill = final_result)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = outcome_colours) +
+  labs(title = "Clicks per student on the six most-used page types",
+       x = "Page type", y = "Clicks per student", fill = "Final result")
+
+# Share of each group's clicks going to each page type
+activity %>%
+  filter(activity_type %in% top_types) %>%
+  select(activity_type, final_result, share_of_group_clicks) %>%
+  mutate(share_of_group_clicks = percent(share_of_group_clicks, 0.1)) %>%
+  pivot_wider(names_from = final_result, values_from = share_of_group_clicks) %>%
+  kable(caption = "Share of each group's clicks by page type")
+```
+The page types are listed as they appear in the data (oucontent, forumng, quiz,
+homepage, subpage, resource); the data does not define them further.
+
+The mix of what students use is broadly similar across all four groups. The
+difference is **volume, not type**: a Pass student averaged 568.7 clicks on
+oucontent pages compared with 75.7 for a Withdrawn student, about 7.5 times as
+many. The shares differ only moderately (oucontent is 29.6% of Pass clicks vs 24.1%
+of Withdrawn clicks). Troubled students use the platform in a somewhat different
+mix, but the main difference is that they use it far less.
+
+# Part H1: The first assessment
+## 9. Assessment behaviour
+
+```{r first-assessment, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: The first assignment: on time, late or missed, with a fair check on students still enrolled
+# Was the first assessment submitted, and was it on time?
+first_timing <- subs %>%
+  semi_join(first_assess,
+            by = c("code_module", "code_presentation", "id_assessment")) %>%
+  transmute(code_module, code_presentation, id_student,
+            # Banked results count as "On time": they were already passed earlier
+            first_assessment = if_else(is_late, "Late", "On time"))
+
+master <- master %>%
+  select(-any_of("first_assessment")) %>%
+  left_join(first_timing, by = k3) %>%
+  mutate(first_assessment = factor(replace_na(first_assessment, "Not submitted"),
+                                   levels = c("On time", "Late", "Not submitted")))
+
+master %>% count(first_assessment) %>%
+  mutate(share = percent(n / sum(n), 0.1)) %>%
+  kable(caption = "First assessment of the module")
+
+plot_outcome(first_assessment, "first assessment submission")
+
+# Fair check: many students who "missed" the first assessment had already left
+# before it was due, so missing it was a result of leaving, not a warning sign.
+# Keep only students still registered on the first assessment's due date.
+first_due <- non_exam %>%
+  semi_join(first_assess, by = c("code_module", "code_presentation", "id_assessment")) %>%
+  select(code_module, code_presentation, first_due_date = date)
+
+master <- master %>%
+  select(-any_of("first_due_date")) %>%
+  left_join(first_due, by = c("code_module", "code_presentation")) %>%
+  mutate(left_before_first_due = !is.na(date_unregistration) &
+                                 date_unregistration <= first_due_date)
+
+master %>%
+  mutate(group = if_else(left_before_first_due,
+                         "Had already left before it was due",
+                         "Still registered on the due date")) %>%
+  filter(first_assessment == "Not submitted") %>%
+  count(group, name = "missed_first") %>%
+  kable(caption = "Students who missed the first assessment")
+
+master %>%
+  filter(!left_before_first_due) %>%
+  group_by(first_assessment) %>%
+  summarise(students        = n(),
+            withdrawal_rate = percent(mean(final_result == "Withdrawn"), 0.1),
+            completion_rate = percent(mean(completed_flag), 0.1)) %>%
+  kable(caption = "First assessment and outcome: students still registered on its due date")
+```
+The first assessment is a clear dividing line. 7,208 registrations (22.1%) have no
+submission for their module's first assessment; 77.8% of them withdrew and 20.4%
+failed, so only 1.8% completed.
+
+**Care is needed here.** Many of these students had already unregistered before
+the first assessment was due, so for them missing it is a *result* of leaving, not
+a warning sign. The fairer comparison uses only students who were still registered
+on the due date. Among them, missing the first assessment is still a strong warning
+sign: 43.1% withdrew and only 4.7% completed, against 13.4% withdrawal
+and 65.6% completion for students who submitted on time. Of the 7,208 who missed
+it, 4,405 had already left and 2,803 were still registered.
+
+Timing matters as well. Students who submitted the first assessment on time
+withdrew at 14.4%; those who submitted it after the listed date withdrew at 28.5%, nearly twice as often.
+Banked results are counted as on time, because they were passed in an earlier run.
+
+# Part H2: How submission falls away over the module
+```{r submission-sequence, fig.height=4.5, fig.width=9}
+# WHAT THIS CHUNK DOES: How hand-ins drop off across the first 4 assignments
+# Number each module-run's non-exam assessments in date order
+seq_assess <- non_exam %>%
+  arrange(code_module, code_presentation, date, id_assessment) %>%
+  group_by(code_module, code_presentation) %>%
+  mutate(assessment_no = row_number()) %>%
+  ungroup() %>%
+  filter(assessment_no <= 4) %>%
+  select(code_module, code_presentation, id_assessment, assessment_no)
+
+# Every student x every one of their first four assessments: submitted or not
+seq_assess %>%
+  inner_join(master %>% select(all_of(k3), final_result),
+             by = c("code_module", "code_presentation"),
+             relationship = "many-to-many") %>%
+  left_join(studentAssessment %>% select(id_assessment, id_student) %>%
+              mutate(submitted = 1),
+            by = c("id_assessment", "id_student")) %>%
+  mutate(submitted = replace_na(submitted, 0)) %>%
+  group_by(assessment_no, final_result) %>%
+  summarise(submission_rate = mean(submitted), .groups = "drop") %>%
+  ggplot(aes(x = assessment_no, y = submission_rate, colour = final_result)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  scale_colour_manual(values = outcome_colours) +
+  labs(title = "Share of students submitting each of the first four assessments",
+       x = "Assessment number (in date order)", y = "Submitted",
+       colour = "Final result")
+```
+Pass and Distinction students submit almost every assessment (Pass: 99.0%, 97.4%,
+98.4%, 95.9% across the first four). Failing students drop away one assessment at a
+time: 79.2%, then 63.0%, 52.0% and 42.1%. Withdrawn students fall faster still,
+from 44.8% to 10.2%.
+
+# Part H3: What "Fail" actually looks like
+```{r silent-fail, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: Show that failing students mostly stop handing work in, not score badly
+# Distribution of submission rate and average score by outcome
+ggplot(master, aes(x = final_result, y = submit_rate, fill = final_result)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = outcome_colours) +
+  labs(title = "Share of non-exam assessments submitted, by final result",
+       x = NULL, y = "Submission rate")
+
+ggplot(master %>% filter(!is.na(avg_score)),
+       aes(x = final_result, y = avg_score, fill = final_result)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_fill_manual(values = outcome_colours) +
+  labs(title = "Average score on submitted assessments, by final result",
+       subtitle = "Students with at least one scored submission",
+       x = NULL, y = "Average score")
+
+# Key facts about failing students
+fail <- master %>% filter(final_result == "Fail")
+pass_median <- median(master$avg_score[master$final_result == "Pass"], na.rm = TRUE)
+
+tibble(
+  measure = c("Failing students",
+              "Submitted fewer than half of their assessments",
+              paste0("Averaged at or above the Pass median score (",
+                     round(pass_median, 1), ")")),
+  value = c(comma(nrow(fail)),
+            percent(mean(fail$submit_rate < 0.5), 0.1),
+            percent(sum(fail$avg_score >= pass_median, na.rm = TRUE) / nrow(fail), 0.1))
+) %>% kable(caption = "Failing students: submission versus score")
+
+# Share of submissions made after the listed date
+master %>%
+  group_by(final_result) %>%
+  summarise(pct_late = percent(sum(n_late) / sum(n_timed), 0.1)) %>%
+  kable(caption = "Share of submissions made after the listed date")
+```
+The two boxplots show that the gap between Pass and Fail is much larger in
+**whether students submit** than in **how well they score**. The median failing
+student submitted 36.4% of their assessments, against 100% for the median Pass
+student, while median average scores were 66.2 and 78.2.
+
+56.4% of failing students submitted fewer than half of their assessments, and
+17.3% averaged at or above the median Pass score. In this data, a "Fail" is more
+often a student who stopped submitting than a student who submitted and scored
+poorly. Failing students' submissions were also more often late (39.3% vs 26.8%;
+banked results are left out of this check).
+
+**For the Board:** most failures look like a slower, quieter form of withdrawal.
+Recorded withdrawals (31.2%) understate how many students disengage; many of the
+21.6% who fail had also largely stopped participating.
+
+# Part H4: A data limitation to state clearly
+```{r exam-coverage}
+# WHAT THIS CHUNK DOES: Show that exam results exist only for modules CCC and DDD
+studentAssessment %>%
+  inner_join(assessments_clean %>% filter(assessment_type == "Exam"),
+             by = "id_assessment") %>%
+  count(code_module, name = "exam_submissions") %>%
+  kable(caption = "Recorded exam submissions by module")
+```
+Every module has at least one Exam in the assessments table, but exam submissions
+are recorded only for modules CCC and DDD. For this reason, exams are excluded from
+the assessment analysis above, and we do not draw conclusions from exam results.
+
+# Part I1: Create the grouping columns
+## 10. Where the problem concentrates
+
+```{r concentration-setup}
+# WHAT THIS CHUNK DOES: Make deprivation groups and the 4 engagement segments
+master <- master %>%
+  mutate(
+    # Three broad deprivation groups (plus Unknown)
+    deprivation_group = case_when(
+      imd_band %in% c("0-10%", "10-20%", "20-30%")           ~ "0-30%",
+      imd_band %in% c("30-40%", "40-50%", "50-60%", "60-70%") ~ "30-70%",
+      imd_band == "Unknown"                                  ~ "Unknown",
+      TRUE                                                   ~ "70-100%"),
+    deprivation_group = factor(deprivation_group,
+                               levels = c("0-30%", "30-70%", "70-100%", "Unknown")),
+    # Engagement segments, built only from what students actually did
+    engagement_segment = case_when(
+      never_clicked      ~ "1. Never clicked",
+      !submitted_first   ~ "2. Clicked, missed first assessment",
+      submit_rate < 0.5  ~ "3. Submitted first, then fewer than half",
+      TRUE               ~ "4. Submitted at least half")
+  )
+```
+
+# Part I2: Workload and deprivation together
+```{r credit-deprivation, fig.height=4.5, fig.width=8}
+# WHAT THIS CHUNK DOES: Completion by workload and deprivation together
+master %>%
+  group_by(deprivation_group, credit_group) %>%
+  summarise(completion = mean(completed_flag), students = n(), .groups = "drop") %>%
+  ggplot(aes(x = credit_group, y = deprivation_group, fill = completion)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = paste0(percent(completion, 0.1), "\n(n = ", students, ")")),
+            size = 3.2) +
+  scale_fill_gradient(low = "#b2182b", high = "#7fbf7b", labels = percent) +
+  labs(title = "Completion rate by credit load and deprivation group",
+       x = "Credits studied", y = "Deprivation band", fill = "Completion")
+```
+The two factors add up. Within every deprivation group, completion falls as credit
+load rises; within every credit group, completion is lowest in the 0-30% band.
+
+The weakest combination is the 0-30% band studying more than 120 credits: only
+22.4% complete (821 students). The strongest group with a known band is 70-100%
+studying 60 credits or less: 58.3% complete.
+
+Students with an Unknown band have the highest completion in every credit group (for example 69.1% at 60 credits or less). The data does not say why their band is missing, so we do not interpret this further.
+
+# Part I3: Is the deprivation gap present in every module?
+```{r module-deprivation, fig.height=5, fig.width=8}
+# WHAT THIS CHUNK DOES: Completion by module and deprivation together
+master %>%
+  filter(deprivation_group != "Unknown") %>%
+  group_by(code_module, deprivation_group) %>%
+  summarise(completion = mean(completed_flag), students = n(), .groups = "drop") %>%
+  ggplot(aes(x = deprivation_group, y = code_module, fill = completion)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = percent(completion, 0.1)), size = 3.2) +
+  scale_fill_gradient(low = "#b2182b", high = "#7fbf7b", labels = percent) +
+  labs(title = "Completion rate by module and deprivation group",
+       x = "Deprivation band", y = "Module", fill = "Completion")
+```
+The 0-30% band has the lowest completion in six of the seven modules (in AAA the bands are close: 67.1% vs 71.0%). The module effect is also visible within each band: in the 0-30% band, completion ranges from 29.1% in CCC to 67.1% in AAA.
+Both who the student is and which module they take matter.
+
+# Part I4: Where the non-completers are
+This is the most useful table for the Board. It groups every student by what they actually did, then shows where the non-completers sit.
+```{r engagement-segments, fig.height=4.5, fig.width=9}
+# WHAT THIS CHUNK DOES: Where the non-completers are, by engagement segment
+segments <- master %>%
+  group_by(engagement_segment) %>%
+  summarise(students        = n(),
+            completion_rate = mean(completed_flag),
+            non_completers  = sum(!completed_flag),
+            withdrawn       = sum(final_result == "Withdrawn"),
+            failed          = sum(final_result == "Fail")) %>%
+  mutate(share_of_students       = students / sum(students),
+         share_of_non_completers = non_completers / sum(non_completers))
+
+segments %>%
+  mutate(across(c(completion_rate, share_of_students, share_of_non_completers),
+                ~ percent(.x, 0.1))) %>%
+  kable(caption = "Engagement segments")
+
+segments %>%
+  select(engagement_segment, share_of_students, share_of_non_completers) %>%
+  pivot_longer(-engagement_segment, names_to = "measure", values_to = "share") %>%
+  mutate(measure = recode(measure,
+                          share_of_students = "Share of all students",
+                          share_of_non_completers = "Share of all non-completers")) %>%
+  ggplot(aes(x = engagement_segment, y = share, fill = measure)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = percent(share, 0.1)),
+            position = position_dodge(width = 0.9), vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("grey60", "#b2182b")) +
+  labs(title = "Where the non-completers are",
+       x = NULL, y = NULL, fill = NULL) +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```
+Segments 1 to 3 are defined only by behaviour already visible in the data: no
+clicks, no first assessment, or fewer than half of assessments submitted. Together
+they are 40.4% of registrations but contain 75.5% of all non-completers
+(12,999 of 17,208), and almost none of them complete (0.1% to 3.4%).
+
+Segment 3 is the largest single source of non-completion (34.2%). These students
+did submit their first assessment, so they started, and then drifted away. It
+contains 2,553 of the 7,052 failing students.
+
+Among students who submitted at least half of their assessments, 78.3% complete.
+
+**A caution on reading this table.** The segments are built from behaviour over the
+whole module, and withdrawing itself stops students clicking and submitting. So
+some students are in segments 1 to 3 *because* they withdrew, not the other way
+round (for example, 4,398 of the 5,606 withdrawn students who missed the first
+assessment had already unregistered before it was due). The table shows *where*
+non-completers sit, not what caused them to leave. The fair check in Part H1, which
+counts only students still registered on the due date, avoids this problem.
+
+# Part I5: Does deprivation still matter once students engage?
+```{r deprivation-within-segments}
+# WHAT THIS CHUNK DOES: Does the deprivation gap shrink once students engage?
+master %>%
+  filter(deprivation_group != "Unknown") %>%
+  group_by(deprivation_group) %>%
+  summarise(
+    overall_completion       = percent(mean(completed_flag), 0.1),
+    pct_in_segments_1_to_3   = percent(mean(engagement_segment !=
+                                             "4. Submitted at least half"), 0.1),
+    completion_in_segment_4  = percent(mean(completed_flag[engagement_segment ==
+                                             "4. Submitted at least half"]), 0.1)
+  ) %>%
+  kable(caption = "Deprivation, engagement and completion")
+```
+Overall, the 0-30% band completes at 38.3% against 54.2% for the 70-100% band, a
+gap of 15.9 percentage points. Much of this gap is linked to engagement: 48.5% of
+the 0-30% band fall into the disengaged segments, compared with 34.4% of the
+70-100% band. Among students who submitted at least half their assessments, the
+gap narrows to 8.3 points (73.4% vs 81.7%).
+
+This is a description, not proof of cause, but it matters for the Board: the deprivation gap is largely a gap in early engagement, and engagement is something the university can act on.
+
+# Part J: Innovation, a third group of students
+## 11. The silent stayers
+
+The official records put every student in one of two boxes: they either withdrew,
+or they stayed until the end. The click data shows there is a third group in
+between. These students never withdraw on paper, but they stop taking part long
+before the end. We call them **silent stayers** and look at them as a group of
+their own, because they need a different kind of help from students who quit.
+
+# Part J1: Finding the silent stayers
+
+For each student we find the **last day they clicked**, and show it as a share of
+the module's length (0% = day 0, 100% = last day). A student is a **silent stayer**
+if they did **not** withdraw officially, but made no clicks at all in the second
+half of the module (or never clicked). Every student then falls into one of three
+segments:
+
+- **Active stayers:** did not withdraw and were still active after halfway.
+- **Silent stayers:** did not withdraw, but went silent before halfway.
+- **Official quitters:** withdrew.
+
+```{r silent-stayers, fig.height=4.5, fig.width=9}
+# WHAT THIS CHUNK DOES: OUR INNOVATION: find the silent stayers (never quit, but went silent) and profile them
+master <- master %>%
+  mutate(
+    last_active_pct = pmax(last_active_day, 0) / module_presentation_length,
+    student_segment = factor(case_when(
+      final_result == "Withdrawn"           ~ "Official quitters",
+      never_clicked | last_active_pct < 0.5 ~ "Silent stayers",
+      TRUE                                  ~ "Active stayers"),
+      levels = c("Active stayers", "Silent stayers", "Official quitters"))
+  )
+
+segment_colours <- c("Active stayers" = "#2F6690", "Silent stayers" = "#E0A43A",
+                     "Official quitters" = "#b2182b")
+
+# Size and final result of each segment
+master %>%
+  group_by(student_segment) %>%
+  summarise(students        = n(),
+            share           = percent(n() / nrow(master), 0.1),
+            ended_as_fail   = percent(mean(final_result == "Fail"), 0.1),
+            completed       = percent(mean(completed_flag), 0.1)) %>%
+  kable(caption = "Three segments of students")
+
+# How the three segments differ
+master %>%
+  group_by(student_segment) %>%
+  summarise(
+    median_last_click       = percent(median(pmin(last_active_pct, 1), na.rm = TRUE), 1),
+    submitted_first         = percent(mean(submitted_first), 0.1),
+    average_score           = round(mean(avg_score, na.rm = TRUE), 1),
+    more_than_120_credits   = percent(mean(studied_credits > 120), 0.1),
+    repeat_attempt          = percent(mean(num_of_prev_attempts > 0), 0.1),
+    below_A_level           = percent(mean(highest_education %in%
+                                           c("No Formal quals", "Lower Than A Level")), 0.1),
+    most_deprived_0_30      = percent(mean(deprivation_group == "0-30%"), 0.1)) %>%
+  kable(caption = "Profile of the three segments")
+
+# When do silent stayers go quiet?
+master %>%
+  filter(student_segment == "Silent stayers", !never_clicked) %>%
+  ggplot(aes(x = last_active_pct)) +
+  geom_histogram(binwidth = 0.05, boundary = 0, fill = "#E0A43A", colour = "white") +
+  scale_x_continuous(labels = percent, limits = c(0, 0.5)) +
+  labs(title = "When silent stayers made their last click",
+       x = "Last active day, as a share of module length", y = "Students")
+
+# Silent stayers by module
+master %>%
+  group_by(code_module) %>%
+  summarise(silent_stayers = sum(student_segment == "Silent stayers"),
+            share_of_module = percent(mean(student_segment == "Silent stayers"), 0.1)) %>%
+  kable(caption = "Silent stayers by module")
+```
+
+**A group the official figures do not show.** 3,325 registrations (10.2%) are
+silent stayers. Almost all of them (3,317, or 99.8%) end with a **Fail** on their
+record. They are 47% of all failing students.
+
+**They are not the same as students who quit.** Official quitters mostly leave at
+the front door (Part F3), and heavy workload is strongly linked to quitting. Silent
+stayers look different:
+
+- **They start.** 61% handed in the first assignment (against 45% of quitters).
+- **Their work was decent.** Their average score before going quiet was 64.8,
+  similar to other non-completers, and two thirds averaged 60 or more.
+- **They fade mid-course.** The typical silent stayer made their last click about
+  a fifth of the way through the module (around day 53, roughly week 8).
+- **Workload is not their problem.** Only 5.1% take more than 120 credits, the
+  same as active stayers and half the rate of quitters.
+- **They are more often repeat students (19.7%), below A level (53.7%) and from
+  the most deprived areas (40.7%)** than active stayers (10.7%, 36.4% and 27.9%).
+- **It varies by module:** from 2.8% of students in AAA to 15.5% in GGG.
+
+**A different retention strategy.** Because silent stayers are still registered,
+the university can still reach them, and because they had started well, the
+problem is not ability. We suggest a strategy aimed at them, separate from the one
+for quitters:
+
+| | Official quitters | Silent stayers |
+|---|---|---|
+| When they are lost | Before the start and in the first month | Mid-course, around week 8 |
+| What stands out | Never engage; heavy workload | Started well, then faded; more repeat, less-qualified and deprived students |
+| Strategy | **Fix the front door**: contact non-starters by day 30, workload advice at sign-up | **Re-engage in the middle**: act on silence while they are still enrolled |
+| Concrete actions | Welcome call; workload check above 120 credits | A tutor contacts any student silent for 3 weeks; a catch-up plan or deadline extension; the option to pause and move to the next presentation instead of failing; study-skills and peer support |
+
+*Interpretation, not proof:* the data shows what these students did, not why. The
+profile suggests that confidence, study skills or life events matter more than
+workload for this group, but the university would need to ask them to be sure.
+
+*Limitation:* "no clicks after halfway" is a simple cut-off chosen for this report.
+A student could still study offline, so this is a measure of lost contact with the
+university, not proof that the student stopped studying.
+
+# Answer to the Board
+
+## 12.1 Key figures
+
+```{r key-figures}
+# WHAT THIS CHUNK DOES: One summary table of the headline numbers for the Board
+tibble(
+  measure = c("Registrations analysed",
+              "Completed (Pass or Distinction)",
+              "Withdrawn",
+              "Silent stayers (did not withdraw, silent before halfway)",
+              "Withdrawal rate, 2013J vs 2014J",
+              "Same, only modules that ran in both years",
+              "Withdrawals on or before day 0",
+              "Withdrawals by day 30",
+              "Registrations with no clicks at all",
+              "Registrations that missed the first assessment",
+              "Non-completers found in engagement segments 1-3"),
+  value = c(
+    comma(nrow(master)),
+    percent(mean(master$completed_flag), 0.1),
+    percent(mean(master$final_result == "Withdrawn"), 0.1),
+    percent(mean(master$student_segment == "Silent stayers"), 0.1),
+    paste(percent(mean(master$final_result[master$code_presentation == "2013J"] == "Withdrawn"), 0.1),
+          "vs",
+          percent(mean(master$final_result[master$code_presentation == "2014J"] == "Withdrawn"), 0.1)),
+    paste(percent(mean(master$final_result[master$code_presentation == "2013J" &
+                                           master$code_module %in% both_years] == "Withdrawn"), 0.1),
+          "vs",
+          percent(mean(master$final_result[master$code_presentation == "2014J" &
+                                           master$code_module %in% both_years] == "Withdrawn"), 0.1)),
+    percent(mean(withdrawn$date_unregistration <= 0), 0.1),
+    percent(mean(withdrawn$date_unregistration <= 30), 0.1),
+    percent(mean(master$never_clicked), 0.1),
+    percent(mean(master$first_assessment == "Not submitted"), 0.1),
+    percent(sum(!master$completed_flag &
+                master$engagement_segment != "4. Submitted at least half") /
+            sum(!master$completed_flag), 0.1))
+) %>% kable(caption = "Key figures for the Board")
+```
+
+## 12.2 What kind of institution are we?
+
+The Board has treated the loss of roughly a third of registrations as the price of
+an open-access mission. The data does not support the idea that this loss is
+spread evenly or is unavoidable. It shows an institution where:
+
+1. **Fewer than half of registrations complete.** 47.2% end in Pass or
+   Distinction, and withdrawal is rising in six of the seven modules. The headline
+   rise (26.8% in 2013J to 34.0% in 2014J) is partly due to CCC joining in 2014;
+   on the same modules it is 26.8% to 31.4%.
+2. **Students are lost at the front door.** 30.7% of withdrawals happen on or
+   before day 0 and half by day 30. 10.3% of registrations never click once.
+3. **"Fail" is mostly a quieter form of withdrawal.** Failing students typically
+   stop submitting work (56.4% submitted fewer than half) rather than submit and
+   score poorly. A third segment, the **silent stayers** (10.2%), never withdraw but
+   go quiet around week 8; almost all of them end with a Fail.
+4. **The problem is concentrated.** Students who never engaged, missed the first
+   assessment, or submitted fewer than half of their assessments are 40.4% of
+   registrations but 75.5% of all non-completers. (Some of these students are in
+   these groups because they had already withdrawn, so this shows where losses
+   sit, not what caused them.)
+5. **Who a student is matters less than what they do.** Every background factor
+   is only weakly linked to outcomes. The strongest (credit load, repeat attempts
+   and module) are practically tied, and two of them, workload and module, are
+   things the university controls. Gender shows almost no link.
+6. **Disadvantage and overload compound.** The 0-30% deprivation band studying
+   more than 120 credits completes at 22.4%. Much of the deprivation gap is linked
+   to early engagement: among students who stayed engaged, the gap narrows from
+   15.9 to 8.3 percentage points.
+
+In short: Meridian is not an institution where students fail at random. It is an
+institution that loses a large share of students before or soon after they start,
+and whose healthy students are clearly visible by what they do in the first weeks.
+
+## 12.3 Where to focus in 2016
+
+Each focus area below follows directly from the findings. The data shows *where*
+the problem is; it cannot show which specific actions will work, so each should be
+introduced in a way that allows its effect to be measured.
+
+1. **The period from registration to day 30.** This is where half of all
+   withdrawals happen. The key target is the 10.3% of registrations who never
+   click at all: 88.8% of them withdraw. (The timing of the first click matters
+   little; students who first clicked before or after day 0 withdrew at similar
+   rates, 24.2% vs 25.9%.)
+2. **The first assessment as a checkpoint.** Among students still registered on
+   its due date, those who missed it completed at only 4.7%, against 65.6% for
+   students who submitted on time. A missed or late first assessment is a clear,
+   early point at which to follow up.
+3. **Students who start and then drift away.** Segment 3 is the largest single
+   source of non-completion (34.2%). Missed submissions should be treated as a
+   sign of disengagement, and "Fail" and "Withdrawn" should be reported together
+   as disengagement rather than as separate problems.
+4. **Credit load at enrolment.** Withdrawal rises from 25.4% at 60 credits or less
+   to 51.3% above 120 credits. Students taking heavy loads, especially in the
+   0-30% band, should be advised on workload when they enrol.
+5. **A review of specific modules.** CCC (44.5% withdrawal) and DDD (35.9%) need
+   review, along with BBB, where 41.5% of withdrawals happen on or before day 0,
+   and GGG, where withdrawal more than doubled (6.9% to 16.8%).
+6. **Better data.** Exam results are recorded only for CCC and DDD, 1,111
+   registrations have no deprivation band, and reasons for withdrawal are not
+   recorded. Filling these gaps would make the 2016 picture more complete.
+7. **Re-engage the silent stayers (Part J).** They need a different strategy from
+   quitters: a tutor contacts any student silent for 3 weeks, offers a catch-up plan
+   or deadline extension, and the option to pause and move to the next presentation
+   instead of failing. Report silent stayers as their own figure each year.
+
+## 12.4 Limitations
+
+- This is a descriptive analysis. It shows associations, not proof of cause.
+- Exam results are available only for modules CCC and DDD, so exams were excluded
+  from the assessment analysis.
+- The data does not define page types (such as oucontent) or assessment types
+  (TMA, CMA), so they are reported by their labels only.
+- The direction of the deprivation bands and the meaning of day 0 are assumptions,
+  stated in Section 4.
+- 93 withdrawn students have no unregistration date and are excluded from the
+  timing analysis.
+- The data covers 22 module-runs across 2013 and 2014 only.
+- 1,909 assessment results were banked (carried over from an earlier run). They
+  count as submitted, but are left out of the late / on-time checks.
+- Withdrawing stops students clicking and submitting, so the engagement segments
+  partly reflect withdrawal rather than predict it. The fair check in Part H1 only
+  uses students who were still registered at the time.
+- The "no clicks after halfway" cut-off for silent stayers is a simple rule chosen
+  for this report; a student could still study offline.
+- As the Board asked, this report describes the present data. It is not a forecast
+  or an early-warning model. The traffic light in the appendix is only an idea for
+  later, and is not part of our answer.
+
+## 12.5 Conclusion
+
+The Board's question was what kind of institution Meridian is. The answer from
+the data is an institution whose completion problem is **early, visible and
+concentrated** rather than spread evenly across its students. That makes 2016 a
+question of where to act first, and the data points clearly to enrolment, the first
+month, and the first assessment. Silent stayers need a second, mid-course
+strategy: re-engaging students who started well and then went quiet.
+
+# Appendix: a next step beyond this brief
+## A day-14 "traffic light" for every student
+
+**Please note:** the Board asked for a picture of the present data, "not a forecast,
+not an early-warning model". This appendix is therefore **not part of our answer**
+to the Board. It is offered only as an idea for after the 2016 plan is set, to
+show how the findings above could later be turned into a practical tool.
+
+Most of the warning signs above are only known late in the module, or are partly a
+result of withdrawing. A student support team needs something it can use **early**.
+So this traffic light uses only four facts that are already known by **day 14**:
+
+1. **Low early activity:** fewer than 50 clicks in days 0-13.
+2. **Heavy workload:** studying more than 120 credits.
+3. **Repeat attempt:** has tried the module before.
+4. **Low prior education:** no formal qualifications, or below A level.
+
+Each student gets one point per warning sign: **Green** = 0, **Amber** = 1,
+**Red** = 2 or more. To keep the test fair, only students still registered on day
+14 are included, because students who had already left cannot be helped by a day-14
+check.
+
+```{r traffic-light, fig.height=4, fig.width=9}
+# WHAT THIS CHUNK DOES: APPENDIX, outside the brief: an idea for later, a day-14 Green/Amber/Red check
+traffic <- master %>%
+  # Only students who had not left by day 14
+  filter(is.na(date_unregistration) | date_unregistration > 14) %>%
+  mutate(
+    flag_low_activity = clicks_first_14_days < 50,
+    flag_heavy_load   = studied_credits > 120,
+    flag_repeat       = num_of_prev_attempts > 0,
+    flag_low_prior_ed = highest_education %in% c("No Formal quals", "Lower Than A Level"),
+    warning_points    = flag_low_activity + flag_heavy_load + flag_repeat + flag_low_prior_ed,
+    traffic_light     = factor(case_when(warning_points == 0 ~ "Green",
+                                         warning_points == 1 ~ "Amber",
+                                         TRUE                ~ "Red"),
+                               levels = c("Green", "Amber", "Red"))
+  )
+
+# How each colour turned out
+traffic_summary <- traffic %>%
+  group_by(traffic_light) %>%
+  summarise(students        = n(),
+            withdrawal_rate = mean(final_result == "Withdrawn"),
+            completion_rate = mean(completed_flag),
+            non_completers  = sum(!completed_flag)) %>%
+  mutate(share_of_students       = students / sum(students),
+         share_of_non_completers = non_completers / sum(non_completers))
+
+traffic_summary %>%
+  mutate(across(c(withdrawal_rate, completion_rate, share_of_students,
+                  share_of_non_completers), ~ percent(.x, 0.1))) %>%
+  kable(caption = "Day-14 traffic light: how each group turned out")
+
+traffic_summary %>%
+  ggplot(aes(x = traffic_light, y = completion_rate, fill = traffic_light)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(percent(completion_rate, 0.1), " complete\n(",
+                               comma(students), " students)")),
+            vjust = -0.3, size = 3.2) +
+  scale_fill_manual(values = c(Green = "#1b7837", Amber = "#f4a582", Red = "#b2182b")) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(title = "Completion rate by day-14 traffic light",
+       x = NULL, y = "Completion rate")
+
+```
+
+**The traffic light sorts students clearly by day 14.** Among the 28,119 students
+still registered on day 14:
+
+- **Green** students (no warning signs, 32.2% of students) completed at **71.7%**.
+- **Amber** students (one sign, 41.7%) completed at **53.7%**.
+- **Red** students (two or more signs, 26.2%) completed at only **35.4%**, and
+  withdrew almost twice as often as Green students (26.7% vs 14.4%).
+
+Red students are 26.2% of students but 37.3% of all non-completers, so a support
+team that starts with Red students is working where the losses are highest.
+
+**If the university wants to go further later:** this check would need no new data
+and no complex model. Every fact it uses is already in the university's systems by
+day 14, so it could be run as a simple weekly report once the 2016 plan is agreed.
+
+*Limitations:* the four signs and their cut-offs were chosen from this same data,
+so the rule should be tried on the 2015 presentations before it is relied on. It
+also misses many students (20.1% of non-completers are Green), so it is a way to
+prioritise, not a way to decide who needs help.
+

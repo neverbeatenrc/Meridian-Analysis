@@ -1,0 +1,7 @@
+# R session and generated files
+.Rhistory
+.RData
+.Rproj.user/
+
+# Downloaded source data (obtain separately; see Data/README.md)
+Data/*.csv
